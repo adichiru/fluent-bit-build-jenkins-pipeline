@@ -1,0 +1,165 @@
+pipeline {
+    agent {
+        node {
+            label 'u16.04'
+        }
+    }
+
+    options {
+        ansiColor('xterm')
+    }
+
+    environment {
+        String application = "fluent-bit"
+        String app_version = ""
+        String architecture = "amd64"
+        // these are not used now but should be extracted in a file like VERSION from which we would control
+        // the content of the control file for the deb package
+        // String DEBEMAIL = "techcore@iqdevops.com"
+        // String DEBFULLNAME = "IQ DevOps Tech Core"
+        String bucket = "iq-infrastructure-apt"
+        String signingKey = "CDD20083"
+        String credentials = "5a6e4b22-0893-4531-9b6c-6c46824e5146"
+    }
+
+    stages {
+        stage('Build for u12.') {
+            agent {
+                node {
+                    label 'u12.04'
+                    //label 'adi_test_12'
+                }
+            }
+            steps {
+                script {
+                    // get the sources
+                    app_version = readFile('VERSION').trim()
+                    echo "Version is ${app_version}"
+                    sh "tar -xzf ${application}-${app_version}.tar.gz"
+                    sh "mv ${application}-${app_version} ${application}-src"
+                }
+
+                dir ("${application}-src") {
+                    // configure the sources WITHOUT SYSTEMD support
+                    sh "patch CMakeLists.txt ../eax_patches/CMakeLists.txt.no-systemd.patch"
+                    sh "patch -Np1 --ignore-whitespace debian/control ../eax_patches/control.no-systemd.patch"
+                    sh "sed -i 's|\${version}|${app_version}|g' debian/control"
+                }
+                dir ("${application}-src/build") {
+                    // compile the sources
+                    sh "cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/apps/fluent-bit/ -DCMAKE_INSTALL_SYSCONFDIR=/opt/etc -DFLB_TD=0"
+                    sh "make"
+                }
+
+                script {
+                    // build the .deb package
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/opt/etc/fluent-bit/"
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/opt/etc/fluent-bit/conf.d/"
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/opt/apps/fluent-bit/bin"
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/opt/var/log/fluent-bit/"
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/opt/var/fluent-bit/"
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/etc/init/"
+                    sh "mkdir -p ${application}-nosystemd_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/debian/control ${application}-nosystemd_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/debian/copyright ${application}-nosystemd_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/debian/changelog ${application}-nosystemd_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/build/bin/fluent-bit ${application}-nosystemd_${app_version}_${architecture}/opt/apps/fluent-bit/bin/"
+                    sh "cp eax_files/fluent-bit-upstart.conf ${application}-nosystemd_${app_version}_${architecture}/etc/init/fluent-bit.conf"
+                    sh "cp ${application}-src/conf/parsers.conf ${application}-nosystemd_${app_version}_${architecture}/opt/etc/fluent-bit/"
+                    sh "sudo chown -R root: ${application}-nosystemd_${app_version}_${architecture}/*"
+                    sh "dpkg-deb --build ${application}-nosystemd_${app_version}_${architecture}"
+                }
+
+                script {
+                    // test the .deb package
+                    sh "dpkg -I ${application}-nosystemd_${app_version}_${architecture}.deb"
+                }
+
+                // Deploy the u12 package to S3 apt.
+                withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${credentials}", usernameVariable: 'DEB_ACCESS_KEY', passwordVariable: 'DEB_SECRET_KEY']]) {
+                    script {
+                        sh "source /home/originautomation/.rvm/scripts/rvm && deb-s3 upload --sign=${signingKey} --bucket=${bucket} --access-key-id=${env.DEB_ACCESS_KEY} --secret-access-key=${env.DEB_SECRET_KEY} ${application}-nosystemd_${app_version}_${architecture}.deb"
+                    }
+                }
+            }
+            post {
+                always {
+                    cleanWs()
+                }
+            }
+        }
+
+
+
+
+        stage('Build for u16.04') {
+            agent {
+                node {
+                    label 'u16.04'
+                    //label 'adi-test'
+                }
+            }
+            steps {
+                script {
+                    // get the sources
+                    app_version = readFile('VERSION').trim()
+                    echo "Version is ${app_version}"
+                    sh "tar -xzvf ${application}-${app_version}.tar.gz"
+                    sh "mv ${application}-${app_version} ${application}-src"
+                }
+
+                dir ("${application}-src") {
+                    // configure the sources WITH SYSTEMD support
+                    sh "patch CMakeLists.txt ../eax_patches/CMakeLists.txt.patch"
+                    sh "patch -Np1 --ignore-whitespace debian/control ../eax_patches/control.patch"
+                    sh "patch -Np1 --ignore-whitespace init/systemd.in ../eax_patches/systemd.in.patch"
+                    sh "sed -i 's|\${version}|${app_version}|g' debian/control"
+                }
+                dir ("${application}-src/build") {
+                    // compile the sources
+                    sh "cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/apps/fluent-bit/ -DCMAKE_INSTALL_SYSCONFDIR=/opt/etc -DFLB_TD=0"
+                    sh "make"
+                }
+                script {
+                    // build the .deb package
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/opt/etc/fluent-bit/"
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/opt/etc/fluent-bit/conf.d/"
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/opt/apps/fluent-bit/bin"
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/opt/var/log/fluent-bit/"
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/opt/var/fluent-bit/"
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/etc/systemd/system/"
+                    sh "mkdir -p ${application}_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/debian/control ${application}_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/debian/copyright ${application}_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/debian/changelog ${application}_${app_version}_${architecture}/DEBIAN/"
+                    sh "cp ${application}-src/build/bin/fluent-bit ${application}_${app_version}_${architecture}/opt/apps/fluent-bit/bin/"
+                    sh "cp ${application}-src/init/fluent-bit.service ${application}_${app_version}_${architecture}/etc/systemd/system/"
+                    sh "cp ${application}-src/conf/parsers.conf ${application}_${app_version}_${architecture}/opt/etc/fluent-bit/"
+                    sh "sudo chown -R root: ${application}_${app_version}_${architecture}/*"
+                    sh "dpkg-deb --build ${application}_${app_version}_${architecture}"
+                }
+                script {
+                    // test the .deb package
+                    sh "dpkg -I ${application}_${app_version}_${architecture}.deb"
+                }
+                // Deploy the u16.04 package to the S3 apt bucket.
+                withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${credentials}", usernameVariable: 'DEB_ACCESS_KEY', passwordVariable: 'DEB_SECRET_KEY']]) {
+                    script {
+                        sh "source /home/build.user/.rvm/scripts/rvm && deb-s3 upload --sign=${signingKey} --bucket=${bucket} --access-key-id=${env.DEB_ACCESS_KEY} --secret-access-key=${env.DEB_SECRET_KEY} ${application}_${app_version}_${architecture}.deb"
+                    }
+                }
+            }
+            post {
+                always {
+                    cleanWs()
+                }
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
+
